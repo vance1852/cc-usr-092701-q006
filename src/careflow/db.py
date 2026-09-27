@@ -11,7 +11,7 @@ from typing import Iterator
 
 from .errors import StorageFailure
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -155,6 +155,56 @@ CREATE TABLE IF NOT EXISTS plan_revisions (
     created_at TEXT NOT NULL,
     PRIMARY KEY(plan_id,revision)
 );
+CREATE TABLE IF NOT EXISTS pathway_templates (
+    id TEXT PRIMARY KEY,
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    name TEXT NOT NULL,
+    program TEXT NOT NULL CHECK(program IN ('aesthetic','weight','wellbeing')),
+    created_by TEXT NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL,
+    UNIQUE(clinic_id,name)
+);
+CREATE TABLE IF NOT EXISTS pathway_template_versions (
+    id TEXT PRIMARY KEY,
+    template_id TEXT NOT NULL REFERENCES pathway_templates(id),
+    version INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('draft','pending_review','published','rejected','superseded','withdrawn')),
+    required_sections_json TEXT NOT NULL,
+    nodes_json TEXT NOT NULL,
+    created_by TEXT NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    submitted_by TEXT REFERENCES staff(id),
+    submitted_at TEXT,
+    reviewed_by TEXT REFERENCES staff(id),
+    reviewed_at TEXT,
+    review_note TEXT,
+    published_at TEXT,
+    withdrawn_by TEXT REFERENCES staff(id),
+    withdrawn_at TEXT,
+    withdraw_reason TEXT,
+    UNIQUE(template_id,version)
+);
+CREATE INDEX IF NOT EXISTS pathway_versions_template_state ON pathway_template_versions(template_id,state);
+CREATE TABLE IF NOT EXISTS plan_pathway_bindings (
+    plan_id TEXT PRIMARY KEY REFERENCES plans(id),
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    template_version_id TEXT NOT NULL REFERENCES pathway_template_versions(id),
+    generation INTEGER NOT NULL,
+    bound_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_pathway_bindings_version ON plan_pathway_bindings(template_version_id);
+CREATE TABLE IF NOT EXISTS pathway_migrations (
+    id TEXT PRIMARY KEY,
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    plan_id TEXT NOT NULL REFERENCES plans(id),
+    from_version_id TEXT REFERENCES pathway_template_versions(id),
+    to_version_id TEXT NOT NULL REFERENCES pathway_template_versions(id),
+    reason TEXT NOT NULL,
+    approved_by TEXT NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pathway_migrations_plan ON pathway_migrations(plan_id,created_at);
 CREATE TABLE IF NOT EXISTS appointments (
     id TEXT PRIMARY KEY,
     clinic_id TEXT NOT NULL REFERENCES clinics(id),

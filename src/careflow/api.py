@@ -150,6 +150,49 @@ def create_handler(app: Careflow):
                 data = self.body()
                 return app.transition_plan(clinic_id, actor_id, segments[1], data.get("expected_version", 0),
                                            segments[2], reason=data.get("reason")), 200
+            if self.command == "POST" and segments == ["pathway-templates"]:
+                data = self.body()
+                return app.pathways.create_template(clinic_id, actor_id, data.get("name", ""), data.get("program", ""),
+                                                    data.get("required_sections", []), data.get("nodes", [])), 201
+            if self.command == "GET" and segments == ["pathway-templates"]:
+                params = parse_qs(path.query)
+                return {"items": app.pathways.list_templates(clinic_id, actor_id,
+                                                             program=params.get("program", [None])[0])}, 200
+            if len(segments) == 2 and segments[0] == "pathway-templates" and self.command == "GET":
+                return app.pathways.get_template(clinic_id, actor_id, segments[1]), 200
+            if len(segments) == 3 and segments[0] == "pathway-templates" and segments[2] == "versions" and self.command == "POST":
+                data = self.body()
+                return app.pathways.create_version(clinic_id, actor_id, segments[1],
+                                                   data.get("required_sections", []), data.get("nodes", [])), 201
+            if len(segments) == 3 and segments[0] == "pathway-templates" and segments[2] == "plans" and self.command == "POST":
+                data = self.body()
+                return app.create_plan_from_template(clinic_id, actor_id, segments[1], data.get("patient_id", ""),
+                                                     data.get("clinical_owner", actor_id), data.get("goal", {}),
+                                                     data.get("risk", {}), data.get("start_date", ""),
+                                                     target_date=data.get("target_date"),
+                                                     assessment_id=data.get("assessment_id"),
+                                                     consent_id=data.get("consent_id"),
+                                                     idempotency_key=self.headers.get("Idempotency-Key", "")), 201
+            if len(segments) == 2 and segments[0] == "pathway-template-versions" and self.command == "GET":
+                return app.pathways.get_version(clinic_id, actor_id, segments[1]), 200
+            if len(segments) == 3 and segments[0] == "pathway-template-versions" and segments[2] == "edit" and self.command == "POST":
+                data = self.body()
+                return app.pathways.update_draft(clinic_id, actor_id, segments[1],
+                                                 data.get("required_sections", []), data.get("nodes", [])), 200
+            if len(segments) == 3 and segments[0] == "pathway-template-versions" and segments[2] == "submit" and self.command == "POST":
+                return app.pathways.submit(clinic_id, actor_id, segments[1]), 200
+            if len(segments) == 3 and segments[0] == "pathway-template-versions" and segments[2] == "review" and self.command == "POST":
+                data = self.body()
+                return app.pathways.review(clinic_id, actor_id, segments[1], data.get("action", ""),
+                                           data.get("note", "")), 200
+            if len(segments) == 3 and segments[0] == "pathway-template-versions" and segments[2] == "withdraw" and self.command == "POST":
+                return app.pathways.withdraw(clinic_id, actor_id, segments[1], self.body().get("reason", "")), 200
+            if len(segments) == 3 and segments[0] == "plans" and segments[2] == "pathway" and self.command == "GET":
+                return app.pathways.plan_pathway(clinic_id, actor_id, segments[1]), 200
+            if len(segments) == 3 and segments[0] == "plans" and segments[2] == "pathway-migration" and self.command == "POST":
+                data = self.body()
+                return app.pathways.migrate_plan(clinic_id, actor_id, segments[1], data.get("template_id", ""),
+                                                 data.get("reason", "")), 200
             if len(segments) == 3 and segments[0] == "plans" and segments[2] == "milestones" and self.command == "POST":
                 data = self.body()
                 return app.milestones.create(clinic_id, actor_id, segments[1], data.get("kind", ""),

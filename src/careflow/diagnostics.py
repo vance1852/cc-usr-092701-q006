@@ -50,6 +50,7 @@ class ConsistencyChecker:
         self.check_incident_ledger()
         self.check_signed_records()
         self.check_duplicate_active_reservations()
+        self.check_pathway_versions()
         chain = audit.verify_chain(self.connection, self.clinic_id)
         if not chain["ok"]:
             self.add("audit.chain_mismatch", "critical", "clinic", self.clinic_id,
@@ -204,6 +205,26 @@ class ConsistencyChecker:
             self.add("encounter.signature_mismatch", "high", "encounter", row["id"],
                      {"patient_id": row["patient_id"], "state": row["state"], "signed_by": row["signed_by"],
                       "signed_at": row["signed_at"], "version": row["version"]}, "保留就诊原文并由临床负责人复核签署凭据。")
+
+    def check_pathway_versions(self) -> None:
+        rows = self.connection.execute(
+            "SELECT v.template_id,t.name,COUNT(*) AS published_count FROM pathway_template_versions v "
+            "JOIN pathway_templates t ON t.id=v.template_id WHERE t.clinic_id=? AND v.state='published' "
+            "GROUP BY v.template_id HAVING COUNT(*)>1 ORDER BY v.template_id", (self.clinic_id,)).fetchall()
+        for row in rows:
+            self.add("pathway.multiple_published", "critical", "pathway_template", row["template_id"],
+                     {"name": row["name"], "published_count": row["published_count"]},
+                     "暂停用该模板新建计划，由负责人核对发布记录并保留唯一生效版本。")
+        rows = self.connection.execute(
+            "SELECT p.id AS plan_id,p.kind,p.patient_id,v.id AS version_id,t.program FROM plans p "
+            "JOIN plan_pathway_bindings b ON b.plan_id=p.id JOIN pathway_template_versions v ON v.id=b.template_version_id "
+            "JOIN pathway_templates t ON t.id=v.template_id WHERE p.clinic_id=? AND t.program!=p.kind ORDER BY p.id",
+            (self.clinic_id,)).fetchall()
+        for row in rows:
+            self.add("pathway.binding_program_mismatch", "high", "plan", row["plan_id"],
+                     {"patient_id": row["patient_id"], "plan_kind": row["kind"],
+                      "template_version_id": row["version_id"], "template_program": row["program"]},
+                     "核对计划与路径模板的适用项目，必要时由临床负责人批准迁移到匹配版本。")
 
     def check_duplicate_active_reservations(self) -> None:
         rows = self.connection.execute(

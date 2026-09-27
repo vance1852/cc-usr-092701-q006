@@ -37,11 +37,13 @@ class Careflow:
         from .exports import PatientExportService
         from .milestones import MilestoneService
         from .clinical_flags import ClinicalFlagService
+        from .pathways import PathwayService
         self.supplies = SupplyService(self.db, self.clock)
         self.reports = ReportService(self.db, self.clock)
         self.exports = PatientExportService(self.db, self.clock)
         self.milestones = MilestoneService(self.db, self.clock)
         self.clinical_flags = ClinicalFlagService(self.db, self.clock)
+        self.pathways = PathwayService(self.db, self.clock)
 
     def now(self) -> str:
         return timestamp(self.clock.now())
@@ -425,10 +427,8 @@ class Careflow:
                      "answers": decode_json(row["answers_json"]), "source": row["source"],
                      "status": row["status"], "signed_at": row["signed_at"], "version": row["version"]} for row in rows]
 
-    def create_plan(self, clinic_id: str, actor_id: str, patient_id: str, kind: str, clinical_owner: str,
-                    goal: dict, risk: dict, start_date: str, *, target_date: str | None = None,
-                    assessment_id: str | None = None, consent_id: str | None = None) -> dict[str, Any]:
-        kind = choice(kind, "计划类型", {"aesthetic", "weight", "wellbeing"})
+    @staticmethod
+    def _normalize_plan_input(goal: dict, risk: dict, start_date: str, target_date: str | None):
         goal = object_value(goal, "目标", allowed={"description", "measure", "target", "review_interval_days"})
         risk = object_value(risk, "风险摘要", allowed={"screening", "contraindications", "review_required", "notes"})
         start = calendar_date(start_date, "开始日期")
@@ -440,40 +440,122 @@ class Careflow:
         goal["description"] = text(goal["description"], "目标说明", maximum=1000)
         if "review_interval_days" in goal:
             goal["review_interval_days"] = int(decimal_value(goal["review_interval_days"], "复核间隔", minimum="1", maximum="365"))
+        return goal, risk, start, target
+
+    @staticmethod
+    def _check_plan_dependencies(connection, clinic_id: str, patient_id: str, kind: str,
+                                 clinical_owner: str, assessment_id: str | None,
+                                 consent_id: str | None, now: str) -> None:
+        patient = connection.execute("SELECT * FROM patients WHERE id=? AND clinic_id=?", (patient_id, clinic_id)).fetchone()
+        owner = connection.execute("SELECT * FROM staff WHERE id=? AND clinic_id=? AND active=1", (clinical_owner, clinic_id)).fetchone()
+        if patient is None:
+            raise NotFound("患者不存在")
+        if patient["state"] != "active":
+            raise Conflict("非在诊患者不能建立新计划")
+        if owner is None or owner["role"] not in {"clinician", "owner"}:
+            raise ValidationError("临床负责人必须是有效的医生或负责人")
+        if assessment_id:
+            assessment = connection.execute("SELECT * FROM assessments WHERE id=? AND patient_id=?", (assessment_id, patient_id)).fetchone()
+            if assessment is None or assessment["status"] != "signed":
+                raise Conflict("计划引用的评估不存在或尚未签署")
+        required_purpose = {"aesthetic": "aesthetic_procedure", "weight": "weight_program"}.get(kind)
+        if required_purpose:
+            consent = connection.execute(
+                "SELECT * FROM consents WHERE id=? AND patient_id=? AND purpose=? AND state='granted'",
+                (consent_id, patient_id, required_purpose)).fetchone() if consent_id else None
+            if consent is None or (consent["expires_at"] and parsed_timestamp(consent["expires_at"]) <= parsed_timestamp(now)):
+                raise Conflict("计划需要当前有效的对应授权")
+
+    def _insert_plan(self, connection, *, plan_id: str, clinic_id: str, patient_id: str, kind: str,
+                     actor_id: str, clinical_owner: str, assessment_id: str | None, consent_id: str | None,
+                     goal: dict, risk: dict, start: str, target: str | None, now: str) -> None:
+        connection.execute(
+            "INSERT INTO plans(id,patient_id,clinic_id,kind,state,created_by,clinical_owner,assessment_id,consent_id,goal_json,risk_json,start_date,target_date,created_at,updated_at) "
+            "VALUES(?,?,?,?,'draft',?,?,?,?,?,?,?,?,?,?)",
+            (plan_id, patient_id, clinic_id, kind, actor_id, clinical_owner, assessment_id, consent_id,
+             encode_json(goal), encode_json(risk), start, target, now, now))
+        self._record_plan_revision(connection, plan_id, 1, actor_id, "首次建立", now)
+        audit.append_event(connection, clinic_id=clinic_id, actor_id=actor_id, patient_id=patient_id,
+                           aggregate_type="plan", aggregate_id=plan_id, action="plan.created", occurred_at=now,
+                           payload={"kind": kind, "assessment_id": assessment_id, "consent_id": consent_id})
+
+    def create_plan(self, clinic_id: str, actor_id: str, patient_id: str, kind: str, clinical_owner: str,
+                    goal: dict, risk: dict, start_date: str, *, target_date: str | None = None,
+                    assessment_id: str | None = None, consent_id: str | None = None) -> dict[str, Any]:
+        kind = choice(kind, "计划类型", {"aesthetic", "weight", "wellbeing"})
+        goal, risk, start, target = self._normalize_plan_input(goal, risk, start_date, target_date)
         plan_id = new_id("pln")
         now = self.now()
         with self.db.transaction() as connection:
             authorize(principal_for(connection, actor_id, clinic_id), "clinical:write", clinic_id=clinic_id)
-            patient = connection.execute("SELECT * FROM patients WHERE id=? AND clinic_id=?", (patient_id, clinic_id)).fetchone()
-            owner = connection.execute("SELECT * FROM staff WHERE id=? AND clinic_id=? AND active=1", (clinical_owner, clinic_id)).fetchone()
-            if patient is None:
-                raise NotFound("患者不存在")
-            if patient["state"] != "active":
-                raise Conflict("非在诊患者不能建立新计划")
-            if owner is None or owner["role"] not in {"clinician", "owner"}:
-                raise ValidationError("临床负责人必须是有效的医生或负责人")
-            if assessment_id:
-                assessment = connection.execute("SELECT * FROM assessments WHERE id=? AND patient_id=?", (assessment_id, patient_id)).fetchone()
-                if assessment is None or assessment["status"] != "signed":
-                    raise Conflict("计划引用的评估不存在或尚未签署")
-            required_purpose = {"aesthetic": "aesthetic_procedure", "weight": "weight_program"}.get(kind)
-            if required_purpose:
-                consent = connection.execute(
-                    "SELECT * FROM consents WHERE id=? AND patient_id=? AND purpose=? AND state='granted'",
-                    (consent_id, patient_id, required_purpose)).fetchone() if consent_id else None
-                if consent is None or (consent["expires_at"] and parsed_timestamp(consent["expires_at"]) <= parsed_timestamp(now)):
-                    raise Conflict("计划需要当前有效的对应授权")
-            connection.execute(
-                "INSERT INTO plans(id,patient_id,clinic_id,kind,state,created_by,clinical_owner,assessment_id,consent_id,goal_json,risk_json,start_date,target_date,created_at,updated_at) "
-                "VALUES(?,?,?,?,'draft',?,?,?,?,?,?,?,?,?,?)",
-                (plan_id, patient_id, clinic_id, kind, actor_id, clinical_owner, assessment_id, consent_id,
-                 encode_json(goal), encode_json(risk), start, target, now, now))
-            self._record_plan_revision(connection, plan_id, 1, actor_id, "首次建立", now)
-            audit.append_event(connection, clinic_id=clinic_id, actor_id=actor_id, patient_id=patient_id,
-                               aggregate_type="plan", aggregate_id=plan_id, action="plan.created", occurred_at=now,
-                               payload={"kind": kind, "assessment_id": assessment_id, "consent_id": consent_id})
+            self._check_plan_dependencies(connection, clinic_id, patient_id, kind, clinical_owner,
+                                          assessment_id, consent_id, now)
+            self._insert_plan(connection, plan_id=plan_id, clinic_id=clinic_id, patient_id=patient_id, kind=kind,
+                              actor_id=actor_id, clinical_owner=clinical_owner, assessment_id=assessment_id,
+                              consent_id=consent_id, goal=goal, risk=risk, start=start, target=target, now=now)
         return {"id": plan_id, "patient_id": patient_id, "kind": kind, "state": "draft", "version": 1,
                 "goal": goal, "risk": risk, "start_date": start, "target_date": target}
+
+    def create_plan_from_template(self, clinic_id: str, actor_id: str, template_id: str, patient_id: str,
+                                  clinical_owner: str, goal: dict, risk: dict, start_date: str, *,
+                                  target_date: str | None = None, assessment_id: str | None = None,
+                                  consent_id: str | None = None, idempotency_key: str) -> dict[str, Any]:
+        """按模板当前生效版本建计划：固定引用该版本并一次性生成全部节点。
+
+        相同幂等键与相同内容的重复提交返回首次生成的计划与节点集合，不会
+        追加第二套节点；幂等键被不同内容使用时拒绝。
+        """
+        from . import pathways
+
+        key = require_idempotency_key(idempotency_key)
+        goal, risk, start, target = self._normalize_plan_input(goal, risk, start_date, target_date)
+        plan_id = new_id("pln")
+        now = self.now()
+        body = {"clinic_id": clinic_id, "template_id": template_id, "patient_id": patient_id,
+                "clinical_owner": clinical_owner, "goal": goal, "risk": risk, "start_date": start,
+                "target_date": target, "assessment_id": assessment_id, "consent_id": consent_id}
+        digest = request_digest(body)
+        with self.db.transaction() as connection:
+            authorize(principal_for(connection, actor_id, clinic_id), "clinical:write", clinic_id=clinic_id)
+            previous = connection.execute("SELECT * FROM idempotency WHERE scope='pathway_plan' AND key=?", (key,)).fetchone()
+            if previous:
+                if previous["request_hash"] != digest:
+                    raise Conflict("计划创建幂等编号已用于其他内容")
+                return {**decode_json(previous["response_json"]), "replayed": True}
+            template = connection.execute("SELECT * FROM pathway_templates WHERE id=? AND clinic_id=?",
+                                          (template_id, clinic_id)).fetchone()
+            if template is None:
+                raise NotFound("诊疗路径模板不存在")
+            version = pathways.published_version(connection, template_id)
+            if version is None:
+                raise Conflict("模板当前没有已发布版本，不能用于新计划")
+            kind = template["program"]
+            self._check_plan_dependencies(connection, clinic_id, patient_id, kind, clinical_owner,
+                                          assessment_id, consent_id, now)
+            self._insert_plan(connection, plan_id=plan_id, clinic_id=clinic_id, patient_id=patient_id, kind=kind,
+                              actor_id=actor_id, clinical_owner=clinical_owner, assessment_id=assessment_id,
+                              consent_id=consent_id, goal=goal, risk=risk, start=start, target=target, now=now)
+            clinic = connection.execute("SELECT timezone FROM clinics WHERE id=?", (clinic_id,)).fetchone()
+            nodes = pathways.insert_generated_milestones(
+                connection, plan_id=plan_id, start_date=start, timezone_name=clinic["timezone"],
+                nodes=decode_json(version["nodes_json"]), clinical_owner=clinical_owner,
+                actor_id=actor_id, now=now, generation=0)
+            connection.execute("INSERT INTO plan_pathway_bindings(plan_id,clinic_id,template_version_id,generation,bound_at) VALUES(?,?,?,0,?)",
+                               (plan_id, clinic_id, version["id"], now))
+            audit.append_event(connection, clinic_id=clinic_id, actor_id=actor_id, patient_id=patient_id,
+                               aggregate_type="plan", aggregate_id=plan_id, action="pathway.plan_instantiated",
+                               occurred_at=now, payload={"template_id": template_id,
+                                                         "template_version_id": version["id"],
+                                                         "template_version": version["version"],
+                                                         "node_ids": [node["id"] for node in nodes]})
+            result = {"plan": {"id": plan_id, "patient_id": patient_id, "kind": kind, "state": "draft",
+                               "version": 1, "goal": goal, "risk": risk, "start_date": start, "target_date": target,
+                               "template_id": template_id, "template_version_id": version["id"],
+                               "template_version": version["version"], "pathway_generation": 0},
+                      "nodes": nodes}
+            connection.execute("INSERT INTO idempotency(scope,key,request_hash,response_json,created_at) VALUES('pathway_plan',?,?,?,?)",
+                               (key, digest, encode_json(result), now))
+        return {**result, "replayed": False}
 
     def _record_plan_revision(self, connection, plan_id: str, revision: int, actor_id: str, reason: str, now: str) -> None:
         row = connection.execute("SELECT * FROM plans WHERE id=?", (plan_id,)).fetchone()
