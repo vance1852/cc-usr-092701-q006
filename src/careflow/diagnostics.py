@@ -50,6 +50,7 @@ class ConsistencyChecker:
         self.check_incident_ledger()
         self.check_signed_records()
         self.check_duplicate_active_reservations()
+        self.check_pathway_references()
         chain = audit.verify_chain(self.connection, self.clinic_id)
         if not chain["ok"]:
             self.add("audit.chain_mismatch", "critical", "clinic", self.clinic_id,
@@ -219,6 +220,32 @@ class ConsistencyChecker:
                      {"appointments": [row["first_id"], row["second_id"]],
                       "intervals": [[row["starts_at"], row["first_end"]], [row["second_start"], row["second_end"]]]},
                      "联系诊所排班负责人核对是否为合法协同服务或重复占用。")
+
+    def check_pathway_references(self) -> None:
+        rows = self.connection.execute(
+            "SELECT p.id,p.patient_id,p.kind,p.state,p.pathway_template_version_id,v.state AS version_state,"
+            "v.definition_json,t.code AS template_code,t.current_version_id "
+            "FROM plans p LEFT JOIN pathway_template_versions v ON v.id=p.pathway_template_version_id "
+            "LEFT JOIN pathway_templates t ON t.id=v.template_id WHERE p.clinic_id=?",
+            (self.clinic_id,)).fetchall()
+        for row in rows:
+            if row["pathway_template_version_id"] is None:
+                continue
+            if row["version_state"] is None:
+                self.add("pathway.version_missing", "high", "plan", row["id"],
+                         {"patient_id": row["patient_id"], "pathway_template_version_id": row["pathway_template_version_id"]},
+                         "计划引用的路径版本记录缺失，核对备份后恢复，不得删除既有计划节点。")
+            elif row["version_state"] not in {"published", "superseded"}:
+                self.add("pathway.version_invalid_state", "high", "plan", row["id"],
+                         {"patient_id": row["patient_id"], "version_state": row["version_state"],
+                          "template_code": row["template_code"]},
+                         "计划固定引用的版本状态异常，核对审批与撤回记录，保留已生成节点。")
+            milestone_count = self.connection.execute(
+                "SELECT count(*) FROM plan_milestones WHERE plan_id=?", (row["id"],)).fetchone()[0]
+            if milestone_count == 0:
+                self.add("pathway.plan_without_milestones", "medium", "plan", row["id"],
+                         {"patient_id": row["patient_id"], "state": row["state"], "template_code": row["template_code"]},
+                         "引用路径模板的计划没有任何节点，核对建计划事务是否只完成了一半。")
 
 
 def clinic_diagnostics(connection, clinic_id: str, as_of: str) -> dict[str, Any]:

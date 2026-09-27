@@ -168,6 +168,60 @@ def create_handler(app: Careflow):
             if self.command == "GET" and segments == ["reports", "overdue-milestones"]:
                 params = parse_qs(path.query)
                 return app.milestones.overdue(clinic_id, actor_id, limit=int(params.get("limit", [200])[0])), 200
+            if self.command == "POST" and segments == ["pathway-templates"]:
+                data = self.body()
+                return app.pathways.create_template(clinic_id, actor_id, data.get("code", ""), data.get("name", ""),
+                                                    data.get("programs", []), data.get("assessment_sections", []),
+                                                    data.get("nodes", []), change_note=data.get("change_note")), 201
+            if self.command == "GET" and len(segments) == 1 and segments[0] == "pathway-templates":
+                params = parse_qs(path.query)
+                return {"items": app.pathways.list_templates(clinic_id, actor_id,
+                                                              program=params.get("program", [None])[0])}, 200
+            if len(segments) == 3 and segments[0] == "pathway-templates" and segments[2] == "versions" and self.command == "POST":
+                return app.pathways.new_draft(clinic_id, actor_id, segments[1]), 201
+            if len(segments) == 3 and segments[0] == "pathway-templates" and segments[2] == "versions" and self.command == "GET":
+                return {"items": app.pathways.list_versions(clinic_id, actor_id, segments[1])}, 200
+            if len(segments) == 2 and segments[0] == "pathway-versions" and self.command == "GET":
+                return app.pathways.get_version(clinic_id, actor_id, segments[1]), 200
+            if len(segments) == 2 and segments[0] == "pathway-versions" and self.command == "PATCH":
+                data = self.body()
+                return app.pathways.edit_draft(clinic_id, actor_id, segments[1],
+                                               programs=data.get("programs", []),
+                                               sections=data.get("assessment_sections", []),
+                                               nodes=data.get("nodes", [])), 200
+            if len(segments) == 3 and segments[0] == "pathway-versions" and segments[2] == "submit" and self.command == "POST":
+                data = self.body()
+                return app.pathways.submit_for_review(clinic_id, actor_id, segments[1], note=data.get("note")), 200
+            if len(segments) == 3 and segments[0] == "pathway-versions" and segments[2] == "review" and self.command == "POST":
+                data = self.body()
+                return app.pathways.review(clinic_id, actor_id, segments[1], data.get("decision", ""),
+                                           data.get("note", "")), 200
+            if len(segments) == 3 and segments[0] == "pathway-versions" and segments[2] == "withdraw" and self.command == "POST":
+                data = self.body()
+                return app.pathways.withdraw_version(clinic_id, actor_id, segments[1], data.get("reason", "")), 200
+            if len(segments) == 3 and segments[0] == "patients" and segments[2] == "pathway-plans" and self.command == "POST":
+                data = self.body()
+                return app.pathways.create_plan_from_template(
+                    clinic_id, actor_id, segments[1], data.get("program", ""),
+                    data.get("clinical_owner", actor_id), data.get("start_date", ""),
+                    goal=data.get("goal"), risk=data.get("risk"), target_date=data.get("target_date"),
+                    assessment_id=data.get("assessment_id"), consent_id=data.get("consent_id"),
+                    idempotency_key=self.headers.get("Idempotency-Key", "")), 201
+            if len(segments) == 3 and segments[0] == "plans" and segments[2] == "migrations" and self.command == "POST":
+                data = self.body()
+                return app.pathways.request_migration(clinic_id, actor_id, segments[1],
+                                                      data.get("target_version_id", ""), data.get("reason", ""),
+                                                      idempotency_key=self.headers.get("Idempotency-Key", "")), 201
+            if self.command == "GET" and segments == ["pathway-migrations"]:
+                params = parse_qs(path.query)
+                return {"items": app.pathways.list_migrations(clinic_id, actor_id,
+                                                               plan_id=params.get("plan_id", [None])[0],
+                                                               state=params.get("state", [None])[0])}, 200
+            if len(segments) == 3 and segments[0] == "pathway-migrations" and segments[2] == "decide" and self.command == "POST":
+                data = self.body()
+                return app.pathways.decide_migration(clinic_id, actor_id, segments[1], data.get("decision", ""),
+                                                     data.get("note", ""),
+                                                     expected_version=data.get("expected_version")), 200
             if self.command == "POST" and segments == ["appointments"]:
                 data = self.body()
                 key = self.headers.get("Idempotency-Key", "")

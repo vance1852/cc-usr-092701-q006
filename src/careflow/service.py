@@ -37,11 +37,13 @@ class Careflow:
         from .exports import PatientExportService
         from .milestones import MilestoneService
         from .clinical_flags import ClinicalFlagService
+        from .pathways import PathwayTemplateService
         self.supplies = SupplyService(self.db, self.clock)
         self.reports = ReportService(self.db, self.clock)
         self.exports = PatientExportService(self.db, self.clock)
         self.milestones = MilestoneService(self.db, self.clock)
         self.clinical_flags = ClinicalFlagService(self.db, self.clock)
+        self.pathways = PathwayTemplateService(self.db, self.clock, self._record_plan_revision)
 
     def now(self) -> str:
         return timestamp(self.clock.now())
@@ -478,6 +480,7 @@ class Careflow:
     def _record_plan_revision(self, connection, plan_id: str, revision: int, actor_id: str, reason: str, now: str) -> None:
         row = connection.execute("SELECT * FROM plans WHERE id=?", (plan_id,)).fetchone()
         snapshot = {key: row[key] for key in ("kind", "state", "clinical_owner", "assessment_id", "consent_id", "goal_json", "risk_json", "start_date", "target_date", "version")}
+        snapshot["pathway_template_version_id"] = row["pathway_template_version_id"]
         connection.execute("INSERT INTO plan_revisions(plan_id,revision,snapshot_json,changed_by,change_reason,created_at) VALUES(?,?,?,?,?,?)",
                            (plan_id, revision, encode_json(snapshot), actor_id, reason, now))
 

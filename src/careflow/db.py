@@ -11,7 +11,7 @@ from typing import Iterator
 
 from .errors import StorageFailure
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -155,6 +155,66 @@ CREATE TABLE IF NOT EXISTS plan_revisions (
     created_at TEXT NOT NULL,
     PRIMARY KEY(plan_id,revision)
 );
+CREATE TABLE IF NOT EXISTS pathway_templates (
+    id TEXT PRIMARY KEY,
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    programs_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('active','retired')),
+    current_version_id TEXT,
+    created_by TEXT NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(clinic_id,code)
+);
+CREATE TABLE IF NOT EXISTS pathway_template_versions (
+    id TEXT PRIMARY KEY,
+    template_id TEXT NOT NULL REFERENCES pathway_templates(id),
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    version_no INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('draft','pending_review','published','rejected','superseded','withdrawn')),
+    definition_json TEXT NOT NULL,
+    content_digest TEXT NOT NULL,
+    created_by TEXT NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL,
+    submitted_at TEXT,
+    published_at TEXT,
+    published_by TEXT REFERENCES staff(id),
+    withdrawn_at TEXT,
+    withdrawn_by TEXT REFERENCES staff(id),
+    withdrawal_reason TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(template_id,version_no)
+);
+CREATE INDEX IF NOT EXISTS pathway_versions_template ON pathway_template_versions(template_id,version_no DESC);
+CREATE TABLE IF NOT EXISTS pathway_template_approvals (
+    id TEXT PRIMARY KEY,
+    version_id TEXT NOT NULL REFERENCES pathway_template_versions(id),
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    decision TEXT NOT NULL CHECK(decision IN ('approved','rejected')),
+    reviewer_id TEXT NOT NULL REFERENCES staff(id),
+    note TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pathway_approvals_version ON pathway_template_approvals(version_id,created_at);
+CREATE TABLE IF NOT EXISTS plan_template_migrations (
+    id TEXT PRIMARY KEY,
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    plan_id TEXT NOT NULL REFERENCES plans(id),
+    from_version_id TEXT NOT NULL REFERENCES pathway_template_versions(id),
+    to_version_id TEXT NOT NULL REFERENCES pathway_template_versions(id),
+    state TEXT NOT NULL CHECK(state IN ('pending','approved','rejected')),
+    requested_by TEXT NOT NULL REFERENCES staff(id),
+    requested_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    decided_by TEXT REFERENCES staff(id),
+    decided_at TEXT,
+    decision_note TEXT
+);
+CREATE INDEX IF NOT EXISTS plan_migrations_plan ON plan_template_migrations(plan_id,state,requested_at);
+CREATE UNIQUE INDEX IF NOT EXISTS plan_migrations_pending ON plan_template_migrations(plan_id) WHERE state='pending';
 CREATE TABLE IF NOT EXISTS appointments (
     id TEXT PRIMARY KEY,
     clinic_id TEXT NOT NULL REFERENCES clinics(id),
@@ -399,6 +459,10 @@ class Database:
         try:
             with self.session() as connection:
                 connection.executescript(SCHEMA)
+                self._ensure_column(connection, "plans", "pathway_template_version_id",
+                                    "ALTER TABLE plans ADD COLUMN pathway_template_version_id TEXT REFERENCES pathway_template_versions(id)")
+                self._ensure_column(connection, "plan_milestones", "template_node_code",
+                                    "ALTER TABLE plan_milestones ADD COLUMN template_node_code TEXT")
                 connection.execute(
                     "INSERT INTO schema_meta(key,value) VALUES('schema_version',?) "
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -406,6 +470,13 @@ class Database:
                 )
         except sqlite3.Error as exc:
             raise StorageFailure("数据库初始化失败", details={"reason": type(exc).__name__}) from exc
+
+    @staticmethod
+    def _ensure_column(connection: sqlite3.Connection, table: str, column: str, statement: str) -> None:
+        """为既有数据库补充新增列；新库由建表语句直接提供。"""
+        columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            connection.execute(statement)
 
     @contextmanager
     def transaction(self, *, write: bool = True) -> Iterator[sqlite3.Connection]:

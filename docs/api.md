@@ -21,6 +21,24 @@
 
 评估签署后不可覆盖。就诊病历由章节组成，签署需要主诉、评估和计划三部分；签署后的补充内容成为新版本，原始文字仍保留。
 
+## 诊疗路径模板
+
+诊疗路径模板供医疗负责人统一定义同类项目的评估与随访安排，只有医生或诊所负责人（`clinician`/`owner`）可以管理，全程进入审计哈希链。模板按版本发布，内容包含：
+
+- `programs`：适用项目，取值 `aesthetic`、`weight`、`wellbeing`；
+- `assessment_sections`：建计划前评估必须覆盖的章节（`measurements`、`answers`、`history`、`screening`、`risk`、`goals`）；
+- `nodes`：一次性生成的计划节点，每项含唯一 `code`、节点 `kind`（与计划节点类型一致）、`title` 和相对开始日的 `offset_days` 间隔。
+
+接口与规则：
+
+- `POST /pathway-templates` 建立模板和首个草稿；`PATCH /pathway-versions/{version_id}` 修改草稿或被驳回版本。
+- `POST /pathway-versions/{version_id}/submit` 提交审批；`POST /pathway-versions/{version_id}/review` 由**另一名**有权限的医生批准或驳回，审批结论和意见不可改。草稿作者不能审批自己的草稿，护理、协调和审计岗位无权审批。
+- 批准即发布，旧已发布版本变为 `superseded`；`GET /pathway-templates?program=weight` 与 `GET /pathway-templates/{template_id}/versions` 供审核发布前核对。
+- `POST /pathway-versions/{version_id}/withdraw` 撤回未被引用的已发布版本（内容保留为 `withdrawn`，不删除）；已被任何计划引用的版本拒绝撤回，历史引用始终可解析。
+- `POST /patients/{patient_id}/pathway-plans` 按项目**当时生效**的模板版本建立计划，计划固定记录 `pathway_template_version_id` 并在同一事务内一次性生成全部节点；请求须带 `Idempotency-Key`，重复提交返回原计划与原节点集合（`replayed: true`），不会再加一套。
+- 模板后续发布只影响之后新建的计划；在途计划（提议、生效、暂停）不变。需要跟进新版时，`POST /plans/{plan_id}/migrations` 逐计划申请，`GET /pathway-migrations?state=pending` 查看待批，`POST /pathway-migrations/{migration_id}/decide` 由临床负责人逐个 `approved`/`rejected`。批准后同代码待办节点按新间隔改期、新节点补入、被移除的待办节点取消并全部记入节点事件与计划修订历史；已完成节点保留为历史。迁移同样支持幂等键，且只能在同一模板的不同已发布版本之间进行。
+
+
 ## 预约、随访与计划节点
 
 创建预约须提供 `Idempotency-Key`，有责任人的预约不能与未结束时段重叠。临时占位到期后由 `POST /appointments/{id}/book` 拒绝确认，过期占位可通过服务方法按限额释放。预约状态按占位、确认、到诊、服务、完成推进；开始服务时产生就诊记录。
@@ -45,7 +63,8 @@
 
 ## 主要状态
 
-- 计划：草稿 → 提议 → 生效；可暂停和恢复，完成或取消后不能重新激活。
+- 路径模板版本：草稿 → 待审批 → 已发布；可被驳回后修改重提；发布新版后旧版成为已取代；未被引用的已发布版本可撤回，已引用版本只能保留。状态流转和审批意见均入审计链。
+- 计划：草稿 → 提议 → 生效；可暂停和恢复，完成或取消后不能重新激活。按模板建立的计划固定引用模板版本，迁移经逐个批准后改记新版本。
 - 预约：占位 → 确认 → 到诊 → 服务中 → 完成；取消和未到诊是独立终态。
 - 不良事件：已报告 → 分诊 → 观察 → 已解决 → 关闭。每次处置单独记录操作人和理由。
 - 耗材预留：预留 → 释放或核销。库存数量由收货、预留、释放和更正流水求和，不直接改写历史数量。

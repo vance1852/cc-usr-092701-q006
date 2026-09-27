@@ -110,7 +110,8 @@ class MilestoneService:
                 raise NotFound("诊疗计划不存在")
             rows = connection.execute("SELECT * FROM plan_milestones WHERE plan_id=? ORDER BY due_at,id", (plan_id,)).fetchall()
             return [{"id": row["id"], "kind": row["kind"], "title": row["title"], "due_at": row["due_at"],
-                     "state": row["state"], "assigned_to": row["assigned_to"], "version": row["version"]} for row in rows]
+                     "state": row["state"], "assigned_to": row["assigned_to"],
+                     "template_node_code": row["template_node_code"], "version": row["version"]} for row in rows]
 
     def history(self, clinic_id: str, actor_id: str, milestone_id: str) -> list[dict]:
         with self.db.transaction(write=False) as connection:
